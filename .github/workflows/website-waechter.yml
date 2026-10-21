@@ -1,0 +1,49 @@
+# .github/workflows/website-waechter.yml  (Repo: prs72/website-waechter, oeffentlich)
+# Prueft alle 10 Minuten von aussen, unabhaengig von Mini, Studio und Heimnetz.
+# Oeffentlich, weil GitHub Free fuer private Repos nur 2.000 Minuten im Monat enthaelt.
+name: Website-Waechter
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch: {}
+permissions:
+  contents: write   # nur fuer den Keepalive-Commit
+concurrency: website-waechter
+jobs:
+  pruefen:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Letzten Zustand holen
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: waechter-status.json
+          key: waechter-${{ github.run_id }}
+          restore-keys: waechter-
+      - name: Pruefen
+        env:
+          TZ: Europe/Berlin
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        # Rot (Exit 1) meldet Telegram, nicht GitHub: sonst kaeme alle 10 Minuten
+        # eine Fehlermail. Nur Exit 2 (Telegram nicht zustellbar) laesst den Lauf scheitern.
+        run: python3 waechter.py --state waechter-status.json || [ $? -eq 1 ]
+      - name: Zustand sichern
+        if: always()
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: waechter-status.json
+          key: waechter-${{ github.run_id }}
+      # GitHub schaltet geplante Workflows in oeffentlichen Repos nach 60 Tagen
+      # ohne Aktivitaet ab. Alle 45 Tage ein leerer Commit haelt ihn wach.
+      - name: Keepalive
+        if: always()
+        run: |
+          letzter=$(git log -1 --format=%ct)
+          if [ $(( $(date +%s) - letzter )) -gt $(( 45 * 86400 )) ]; then
+            git config user.name "website-waechter"
+            git config user.email "info@betterkind.ai"
+            git commit --allow-empty -m "keepalive"
+            git push
+          fi
