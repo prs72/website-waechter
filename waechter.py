@@ -11,7 +11,8 @@ Kanaele: Telegram (TELEGRAM_TOKEN, TELEGRAM_CHAT_ID) und/oder ntfy (NTFY_URL).
 Ohne Kanal schreibt das Skript nur auf stdout (Trockenlauf).
 
 Aufruf:  python3 waechter.py [--state status.json] [--json]
-Exit-Code 1, wenn mindestens ein Ziel rot ist (fuer CI).
+Exit-Code 1, wenn mindestens ein Ziel rot ist (fuer CI); 2, wenn ein Alarm nicht zustellbar
+war; 3 bei einem unerwarteten Absturz des Waechters selbst.
 """
 import argparse, datetime as dt, json, os, socket, ssl, sys, time
 import urllib.error, urllib.parse, urllib.request
@@ -81,6 +82,17 @@ def zertifikat(host, port=443, timeout=15):
         return False, None, f"TLS-Fehler: {e.__class__.__name__}: {e}"
 
 
+def _fehlerkoerper(e):
+    """Body einer HTTP-Fehlerantwort. Bricht das Lesen ab (Verbindung weg, Zeitueberschreitung,
+    unvollstaendige Antwort), ist der Body leer; der Statuscode bleibt der Befund."""
+    try:
+        return e.read() or b""
+    except Exception:  # noqa: BLE001
+        return b""
+    finally:
+        e.close()
+
+
 def pruefe(z):
     befunde = []
     url = z["url"]
@@ -101,7 +113,7 @@ def pruefe(z):
             r = opener.open(req, timeout=25)
             code, body, ort = r.status, r.read(), r.headers.get("Location", "")
         except urllib.error.HTTPError as e:
-            code, body, ort = e.code, e.read() or b"", e.headers.get("Location", "")
+            code, body, ort = e.code, _fehlerkoerper(e), e.headers.get("Location", "")
         except Exception as e:  # noqa: BLE001
             return z, [f"nicht erreichbar: {e.__class__.__name__}: {e}"], None
         dauer = time.time() - t0
@@ -121,11 +133,17 @@ def pruefe(z):
         if z.get("json_pflicht"):
             try:
                 daten = json.loads(text_body)
-                for k, v in z["json_pflicht"].items():
-                    if daten.get(k) != v:
-                        befunde.append(f"{k} = {daten.get(k)!r} statt {v!r}")
-            except ValueError:
+            except (ValueError, RecursionError):
                 befunde.append("Antwort ist kein JSON")
+            else:
+                if not isinstance(daten, dict):
+                    # gueltiges JSON, aber Liste, Zahl, Text oder null: daten.get() gaebe einen
+                    # AttributeError und der ganze Lauf braeche ohne Alarm ab
+                    befunde.append(f"Antwort ist kein JSON-Objekt (sondern {type(daten).__name__})")
+                else:
+                    for k, v in z["json_pflicht"].items():
+                        if daten.get(k) != v:
+                            befunde.append(f"{k} = {daten.get(k)!r} statt {v!r}")
         if dauer > LANGSAM_SEKUNDEN:
             befunde.append(f"langsam: {dauer:.1f} s")
         return z, befunde, round(dauer, 2)
@@ -154,18 +172,28 @@ def main():
     a = ap.parse_args()
 
     try:
-        alt = json.load(open(a.state))
-    except (OSError, ValueError):
+        with open(a.state) as f:
+            alt = json.load(f)
+    except (OSError, ValueError, RecursionError):
+        alt = {}
+    if not isinstance(alt, dict):  # gueltiges JSON, aber kein Objekt: wie eine leere Datei behandeln
         alt = {}
 
     jetzt = dt.datetime.now(dt.timezone.utc)
     neu, meldungen, rot = {}, [], False
     for z in ZIELE:
-        z, befunde, dauer = pruefe(z)
+        try:
+            z, befunde, dauer = pruefe(z)
+        except Exception as e:  # noqa: BLE001
+            # Ein unerwarteter Fehler in der Pruefung eines Ziels ist selbst ein Befund und
+            # laeuft ueber den normalen Alarmweg; die anderen Ziele werden weiter geprueft.
+            befunde, dauer = [f"Pruefung abgestuerzt: {e.__class__.__name__}: {e}"], None
         kaputt = bool(befunde)
         if kaputt and z["schwere"] == "rot":
             rot = True
-        vorher = alt.get(z["name"], {})
+        vorher = alt.get(z["name"])
+        if not isinstance(vorher, dict):  # fehlt oder beschaedigt
+            vorher = {}
         eintrag = {"kaputt": kaputt, "befunde": befunde, "dauer": dauer,
                    "seit": vorher.get("seit") if vorher.get("kaputt") == kaputt else jetzt.isoformat(),
                    "gemeldet": vorher.get("gemeldet")}
@@ -177,8 +205,13 @@ def main():
         if kaputt != bool(vorher.get("kaputt")) and (kaputt or vorher):
             faellig = True
         elif kaputt and vorher.get("gemeldet"):
-            letzte = dt.datetime.fromisoformat(vorher["gemeldet"])
-            faellig = (jetzt - letzte).total_seconds() > ERINNERUNG_STUNDEN * 3600
+            try:
+                letzte = dt.datetime.fromisoformat(vorher["gemeldet"])
+                if letzte.tzinfo is None:
+                    letzte = letzte.replace(tzinfo=dt.timezone.utc)
+                faellig = (jetzt - letzte).total_seconds() > ERINNERUNG_STUNDEN * 3600
+            except (ValueError, TypeError):
+                faellig = True  # Zeitstempel unbrauchbar: lieber einmal zu viel melden
         elif kaputt and not vorher:
             faellig = True
         if faellig:
@@ -199,7 +232,8 @@ def main():
             # Zustand NICHT speichern, damit der naechste Lauf den Alarm erneut sendet
             print(f"\nALARM KONNTE NICHT GESENDET WERDEN: {e.__class__.__name__}: {e}\n" + text)
             sys.exit(2)
-    json.dump(neu, open(a.state, "w"), indent=2, ensure_ascii=False)
+    with open(a.state, "w") as f:
+        json.dump(neu, f, indent=2, ensure_ascii=False)
     if a.json:
         print(json.dumps(neu, indent=2, ensure_ascii=False))
     # Exit 1 = mindestens ein Ziel rot (fuer lokale Nutzung), 2 = Alarm nicht zustellbar
@@ -207,4 +241,13 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except SystemExit:
+        raise
+    except Exception:  # noqa: BLE001
+        # Ein unbehandelter Fehler sieht sonst wie Exit 1 ("rot") aus, und die Action bliebe gruen,
+        # obwohl der Waechter gar nicht gelaufen ist. Exit 3 laesst den Lauf scheitern.
+        import traceback
+        traceback.print_exc()
+        sys.exit(3)

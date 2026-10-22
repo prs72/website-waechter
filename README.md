@@ -44,9 +44,17 @@ env -u TELEGRAM_TOKEN -u TELEGRAM_CHAT_ID -u NTFY_URL python3 waechter.py --stat
 
 ## GitHub Action
 
-`.github/workflows/website-waechter.yml` läuft alle 10 Minuten (Minute 7, 17, 27, 37, 47 und 57; runde Minuten wie `*/10` verwirft GitHub bei Last oft) und auf Knopfdruck (`workflow_dispatch`). Exit 1 (rot) lässt den Lauf grün, damit GitHub keine Fehlermail pro Lauf schickt, gemeldet wird über Telegram. Nur Exit 2 lässt den Lauf scheitern.
+`.github/workflows/website-waechter.yml` läuft alle 10 Minuten (Minute 7, 17, 27, 37, 47 und 57; runde Minuten wie `*/10` verwirft GitHub bei Last oft) und auf Knopfdruck (`workflow_dispatch`). Exit 1 (rot) lässt den Lauf grün, damit GitHub keine Fehlermail pro Lauf schickt, gemeldet wird über Telegram. Exit 2 (Alarm nicht zustellbar) und Exit 3 (unerwarteter Absturz des Wächters selbst) lassen den Lauf scheitern. Ein Fehler bei der Prüfung eines einzelnen Ziels gilt als Befund dieses Ziels ("Pruefung abgestuerzt") und geht über Telegram, die übrigen Ziele werden weiter geprüft.
 
-Der Schritt "Keepalive" legt einen leeren Commit an, sobald der letzte Commit älter als 45 Tage ist. Dafür braucht der Workflow `contents: write`.
+Der Job "keepalive" legt einen leeren Commit an, sobald der letzte Commit älter als 45 Tage ist. Nur er hat `contents: write`; der Job "pruefen" und der Workflow insgesamt haben `contents: read`.
+
+## Tests
+
+```
+python3 -m unittest discover -s tests -v
+```
+
+Nur Standardbibliothek. Die Tests decken JSON-Antworten ohne Objekt, abbrechendes Body-Lesen bei Fehlerantworten, beschädigte Zustandsdateien und den Absturzcode ab.
 
 ## Benötigte Repository-Secrets
 
