@@ -1,10 +1,12 @@
 # .github/workflows/website-waechter.yml  (Repo: prs72/website-waechter, oeffentlich)
 # Prueft alle 10 Minuten von aussen, unabhaengig von Mini, Studio und Heimnetz.
+# Minuten 7, 17, ...: GitHub verzoegert oder verwirft geplante Laeufe zu runden Minuten (*/10) bei hoher Last
+# (beim ersten Livegang am 22.10.2026 kam mit */10 in knapp 3 Stunden kein einziger geplanter Lauf).
 # Oeffentlich, weil GitHub Free fuer private Repos nur 2.000 Minuten im Monat enthaelt.
 name: Website-Waechter
 on:
   schedule:
-    - cron: "*/10 * * * *"
+    - cron: "7,17,27,37,47,57 * * * *"
   workflow_dispatch: {}
 permissions:
   contents: write   # nur fuer den Keepalive-Commit
